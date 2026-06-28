@@ -3,7 +3,10 @@
 ## Prerequisites
 - [k6 installed](https://grafana.com/docs/k6/latest/set-up/install-k6/)
 - Ledger API running (either locally or via docker-compose)
-- Accounts pre-seeded for the tenant under test
+
+Accounts are **seeded automatically**: each scenario's `setup()` creates a fresh
+pool of accounts via the API and shares the real (server-generated) account IDs
+with every VU. No manual pre-seeding is required.
 
 ## Running
 
@@ -55,22 +58,27 @@ Heavy tests enforce:
 
 ## Account Seeding
 
-Before running load tests, seed accounts via the API:
+Account IDs are server-generated UUIDs, so scenarios cannot reference fixed names
+like `A1`. Instead, each script's `setup()` calls `seedAccounts(n)` (see
+`common.js`), which creates `n` accounts in parallel via `http.batch` and returns
+their IDs. k6 passes that data to every VU as the first argument of the scenario
+function. Re-running a script seeds a fresh pool (old accounts are harmless).
+
+## Environment variables
+
+| Var | Default | Applies to | Purpose |
+|-----|---------|-----------|---------|
+| `BASE_URL` | `http://localhost:8080` | all | Target API base URL |
+| `TENANT` | `t1` | all | `X-Tenant-Id` used for accounts + traffic |
+| `ACCOUNTS` | per-script | baseline / spike / endurance / heavy_throughput / read_after_write | Size of the seeded account pool |
+| `HOT_ACCOUNTS` | `10` | hotspot | Size of the contended hot-account pool |
+| `BATCH_SIZE` | `50` | batch | Items per batch request |
 
 ```bash
-# Create test accounts for throughput tests
-for i in $(seq 1 2000); do
-  curl -s -X POST $BASE_URL/v1/accounts \
-    -H "Content-Type: application/json" \
-    -H "X-Tenant-Id: $TENANT" \
-    -d "{\"name\":\"THR_A$i\",\"type\":\"ASSET\",\"currency\":\"EUR\"}" > /dev/null
-done
-
-# Create idempotency test accounts
-for acc in IDEM_A1 IDEM_A2; do
-  curl -s -X POST $BASE_URL/v1/accounts \
-    -H "Content-Type: application/json" \
-    -H "X-Tenant-Id: $TENANT" \
-    -d "{\"name\":\"$acc\",\"type\":\"ASSET\",\"currency\":\"EUR\"}" > /dev/null
-done
+# Smaller pool for a quick local run
+ACCOUNTS=200 BASE_URL=http://localhost:8080 TENANT=t1 k6 run k6/baseline.js
 ```
+
+> Tip: scenario durations are defined in each script's `options`. For a quick
+> functional check without editing them, interrupt the run after a few seconds
+> (`timeout -s INT 20 k6 run k6/baseline.js`) — k6 still prints a full summary.
