@@ -7,13 +7,14 @@
  * Run: BASE_URL=http://localhost:8080 TENANT=t1 k6 run k6/heavy_throughput.js
  */
 import http from 'k6/http';
-import { check, group, sleep } from 'k6';
+import { check } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
-import { postTx, getBalance, listTx } from './common.js';
-import { uuidv4, randomItem } from './utils.js';
+import {
+  BASE_URL, postTx, postBatch, reverseTx, getBalance, listTx,
+  seedAccounts, pickPair, transfer, randomItem, uuidv4,
+} from './common.js';
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
-const TENANT = __ENV.TENANT || 't1';
+const ACCOUNTS = Number(__ENV.ACCOUNTS || 2000);
 
 // Custom metrics
 const postCounter = new Counter('throughput_posts');
@@ -92,90 +93,49 @@ export const options = {
   },
 };
 
-// 2000 accounts for spreading load
-const accounts = Array.from({ length: 2000 }, (_, i) => `THR_A${i + 1}`);
+export function setup() {
+  return { accounts: seedAccounts(ACCOUNTS, { namePrefix: 'throughput' }) };
+}
 
-// Track posted txIds for reversals
-const postedTxIds = [];
-
-export function postFlood() {
-  const a1 = randomItem(accounts);
-  let a2 = randomItem(accounts);
-  while (a2 === a1) a2 = randomItem(accounts);
-
+export function postFlood(data) {
+  const [a1, a2] = pickPair(data.accounts);
   const amount = Math.floor(Math.random() * 10000) + 1;
-  const payload = {
-    currency: 'EUR',
-    entries: [
-      { accountId: a1, direction: 'DEBIT', amountMinor: amount },
-      { accountId: a2, direction: 'CREDIT', amountMinor: amount },
-    ],
-    metadata: { scenario: 'heavy_throughput', batch: false },
-  };
 
   const start = Date.now();
-  const res = postTx(payload, uuidv4());
+  const res = postTx(transfer(a1, a2, amount, 'heavy_throughput'), uuidv4());
   postLatency.add(Date.now() - start);
   postCounter.add(1);
 
-  const ok = check(res, {
-    'post success': (r) => r.status === 201 || r.status === 409,
-  });
+  const ok = check(res, { 'post success': (r) => r.status === 201 || r.status === 409 });
   correctnessRate.add(ok);
-
-  // Store txId for reversal tests
-  if (res.status === 201 && postedTxIds.length < 5000) {
-    try {
-      const body = res.json();
-      if (body.txId) postedTxIds.push(body.txId);
-    } catch (_) {}
-  }
 }
 
-export function batchIngestion() {
+export function batchIngestion(data) {
   const items = [];
   for (let i = 0; i < 50; i++) {
-    const a1 = randomItem(accounts);
-    let a2 = randomItem(accounts);
-    while (a2 === a1) a2 = randomItem(accounts);
-
+    const [a1, a2] = pickPair(data.accounts);
+    const amount = Math.floor(Math.random() * 1000) + 1;
     items.push({
       idempotencyKey: uuidv4(),
-      transaction: {
-        currency: 'EUR',
-        entries: [
-          { accountId: a1, direction: 'DEBIT', amountMinor: Math.floor(Math.random() * 1000) + 1 },
-          { accountId: a2, direction: 'CREDIT', amountMinor: Math.floor(Math.random() * 1000) + 1 },
-        ],
-        metadata: { scenario: 'heavy_throughput_batch' },
-      },
+      transaction: transfer(a1, a2, amount, 'heavy_throughput_batch'),
     });
-    // Ensure balanced
-    items[items.length - 1].transaction.entries[1].amountMinor = items[items.length - 1].transaction.entries[0].amountMinor;
   }
 
   const start = Date.now();
-  const res = http.post(
-    `${BASE_URL}/v1/transactions:batch`,
-    JSON.stringify({ items }),
-    {
-      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
-    }
-  );
+  const res = postBatch(items);
   batchLatency.add(Date.now() - start);
   batchCounter.add(1);
 
   check(res, { 'batch ok': (r) => r.status === 200 });
 }
 
-export function readMix() {
+export function readMix(data) {
   const r = Math.random();
 
   if (r < 0.6) {
-    const acc = randomItem(accounts);
-    const res = getBalance(acc);
+    const res = getBalance(randomItem(data.accounts));
     readCounter.add(1);
-    check(res, { 'balance ok': (x) => x.status === 200 || x.status === 404 });
+    check(res, { 'balance ok': (x) => x.status === 200 });
   } else if (r < 0.9) {
     const res = listTx(null);
     readCounter.add(1);
@@ -187,27 +147,21 @@ export function readMix() {
   }
 }
 
-export function reversalFlow() {
-  if (postedTxIds.length === 0) {
-    sleep(1);
+export function reversalFlow(data) {
+  // Self-contained: post a transaction, then reverse it. (k6 VUs don't share
+  // state across scenarios, so we can't rely on txIds produced by post_flood.)
+  const [a1, a2] = pickPair(data.accounts);
+  const posted = postTx(transfer(a1, a2, 100, 'heavy_throughput_reversal'), uuidv4());
+  if (posted.status !== 201) return;
+
+  let txId;
+  try {
+    txId = posted.json('txId');
+  } catch (_) {
     return;
   }
 
-  const txId = postedTxIds[Math.floor(Math.random() * postedTxIds.length)];
-  const res = http.post(
-    `${BASE_URL}/v1/transactions/${txId}:reverse`,
-    null,
-    {
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Tenant-Id': TENANT,
-        'Idempotency-Key': uuidv4(),
-      },
-    }
-  );
+  const res = reverseTx(txId, uuidv4());
   reversalCounter.add(1);
-
-  check(res, {
-    'reversal ok': (r) => [201, 409].includes(r.status),
-  });
+  check(res, { 'reversal ok': (r) => [201, 409].includes(r.status) });
 }

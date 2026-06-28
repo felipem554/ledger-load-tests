@@ -8,8 +8,9 @@
  */
 import { check, sleep } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
-import { postTx, getBalance, listTx } from './common.js';
-import { uuidv4, randomItem } from './utils.js';
+import { postTx, getBalance, listTx, seedAccounts, pickPair, transfer, randomItem, uuidv4 } from './common.js';
+
+const ACCOUNTS = Number(__ENV.ACCOUNTS || 1000);
 
 const errorRate = new Rate('error_rate');
 const txCounter = new Counter('endurance_transactions');
@@ -33,37 +34,27 @@ export const options = {
   },
 };
 
-const accounts = Array.from({ length: 1000 }, (_, i) => `END_A${i + 1}`);
+export function setup() {
+  return { accounts: seedAccounts(ACCOUNTS, { namePrefix: 'endurance' }) };
+}
 
-export default function () {
+export default function (data) {
+  const accounts = data.accounts;
   const r = Math.random();
   const start = Date.now();
 
   if (r < 0.5) {
     // Post transaction
-    const a1 = randomItem(accounts);
-    let a2 = randomItem(accounts);
-    while (a2 === a1) a2 = randomItem(accounts);
-
+    const [a1, a2] = pickPair(accounts);
     const amount = Math.floor(Math.random() * 5000) + 1;
-    const res = postTx(
-      {
-        currency: 'EUR',
-        entries: [
-          { accountId: a1, direction: 'DEBIT', amountMinor: amount },
-          { accountId: a2, direction: 'CREDIT', amountMinor: amount },
-        ],
-        metadata: { scenario: 'endurance' },
-      },
-      uuidv4()
-    );
+    const res = postTx(transfer(a1, a2, amount, 'endurance'), uuidv4());
     txCounter.add(1);
     const ok = check(res, { 'post ok': (x) => x.status === 201 || x.status === 409 });
     errorRate.add(!ok);
   } else if (r < 0.8) {
     // Balance read
     const res = getBalance(randomItem(accounts));
-    const ok = check(res, { 'balance ok': (x) => x.status === 200 || x.status === 404 });
+    const ok = check(res, { 'balance ok': (x) => x.status === 200 });
     errorRate.add(!ok);
   } else {
     // List transactions

@@ -10,14 +10,9 @@
  *
  * Run: BASE_URL=http://localhost:8080 TENANT=t1 k6 run k6/heavy_idempotency.js
  */
-import http from 'k6/http';
 import { check, group, sleep } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
-import { postTx, getBalance } from './common.js';
-import { uuidv4 } from './utils.js';
-
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
-const TENANT = __ENV.TENANT || 't1';
+import { postTx, getBalance, seedAccounts, transfer, uuidv4 } from './common.js';
 
 // Custom metrics
 const replayCounter = new Counter('idempotency_replays');
@@ -77,23 +72,20 @@ const REPLAY_KEYS = Array.from({ length: 10000 }, () => uuidv4());
 // Small set of keys that will be hammered by concurrent VUs
 const HOT_KEYS = Array.from({ length: 50 }, () => uuidv4());
 
-const payload = {
-  currency: 'EUR',
-  entries: [
-    { accountId: 'IDEM_A1', direction: 'DEBIT', amountMinor: 1 },
-    { accountId: 'IDEM_A2', direction: 'CREDIT', amountMinor: 1 },
-  ],
-  metadata: { scenario: 'heavy_idempotency' },
-};
+export function setup() {
+  // Two fixed accounts so balances stay deterministic for verification.
+  return { accounts: seedAccounts(2, { namePrefix: 'heavy-idem' }) };
+}
 
-export function replayStorm() {
+export function replayStorm(data) {
+  const [a1, a2] = data.accounts;
   const isReplay = Math.random() < 0.7;
   const key = isReplay
     ? REPLAY_KEYS[Math.floor(Math.random() * REPLAY_KEYS.length)]
     : uuidv4();
 
   const start = Date.now();
-  const res = postTx(payload, key);
+  const res = postTx(transfer(a1, a2, 1, 'heavy_idempotency'), key);
   const elapsed = Date.now() - start;
 
   if (res.status === 201) {
@@ -111,10 +103,11 @@ export function replayStorm() {
   });
 }
 
-export function concurrentDuplicates() {
+export function concurrentDuplicates(data) {
+  const [a1, a2] = data.accounts;
   const key = HOT_KEYS[Math.floor(Math.random() * HOT_KEYS.length)];
 
-  const res = postTx(payload, key);
+  const res = postTx(transfer(a1, a2, 1, 'heavy_idempotency'), key);
 
   check(res, {
     'concurrent dup handled': (r) => r.status === 201 || r.status === 409 || r.status === 200,
@@ -124,20 +117,32 @@ export function concurrentDuplicates() {
   sleep(0.05);
 }
 
-export function verifyBalances() {
+export function verifyBalances(data) {
+  const [a1, a2] = data.accounts;
   group('balance_verification', () => {
-    const res1 = getBalance('IDEM_A1');
-    const res2 = getBalance('IDEM_A2');
+    // The two balances are read in separate, non-atomic calls. Under concurrent
+    // posting they can reflect different points in time, so a naive |a1| == |a2|
+    // check is racy. Every transaction in this 2-account system touches BOTH
+    // accounts, so we bracket the a2 read with two a1 reads: if a1's version is
+    // unchanged across the window, nothing committed and the snapshot is
+    // consistent — only then do we assert. Otherwise the sample is inconclusive
+    // and skipped (not counted as a failure).
+    const r1a = getBalance(a1);
+    const r2 = getBalance(a2);
+    const r1b = getBalance(a1);
 
-    if (res1.status === 200 && res2.status === 200) {
+    if (r1a.status === 200 && r2.status === 200 && r1b.status === 200) {
       try {
-        const b1 = res1.json();
-        const b2 = res2.json();
-        // Debit balance should be negative of credit balance
-        const balanced = Math.abs(b1.postedBalanceMinor) === Math.abs(b2.postedBalanceMinor);
+        const b1a = r1a.json();
+        const b2 = r2.json();
+        const b1b = r1b.json();
+        if (b1a.version !== b1b.version) {
+          return; // a1 changed during the window — inconclusive snapshot
+        }
+        const balanced = Math.abs(b1a.postedBalanceMinor) === Math.abs(b2.postedBalanceMinor);
         balanceCheckRate.add(balanced);
         if (!balanced) {
-          console.warn(`Balance mismatch: A1=${b1.postedBalanceMinor} A2=${b2.postedBalanceMinor}`);
+          console.warn(`Balance mismatch: ${a1}=${b1a.postedBalanceMinor} ${a2}=${b2.postedBalanceMinor}`);
         }
       } catch (e) {
         balanceCheckRate.add(false);
