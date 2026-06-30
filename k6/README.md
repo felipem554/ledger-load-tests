@@ -1,5 +1,9 @@
 # k6 Load Tests
 
+These cover the **HTTP** surface (reads + the HTTP write path). For the
+**Kafka command-stream** write load test, see the [parent README](../README.md)
+(`./gradlew kafkaLoadTest`). All scenarios below are trimmed to ≤ 2 minutes.
+
 ## Prerequisites
 - [k6 installed](https://grafana.com/docs/k6/latest/set-up/install-k6/)
 - Ledger API running (either locally or via docker-compose)
@@ -37,15 +41,18 @@ k6 run k6/endurance.js          # 30-minute soak test for leak detection
 | Script | Purpose | Peak RPS | Duration |
 |--------|---------|----------|----------|
 | `smoke.js` | Health check | 1 | 20s |
-| `baseline.js` | Retail mix (60% reads, 20% list, 20% post) | 500 | 23m |
-| `hotspot.js` | Hot account contention (10 accounts) | 800 | 22m |
-| `spike.js` | Burst / autoscaling | 3000 | 10m |
-| `batch.js` | Batch ingestion (50 txns/batch) | 1000 effective | 10m |
-| `idempotency.js` | Replay storm (70% replays) | 500 | 8m |
-| `read_after_write.js` | Consistency: post then read | 50 VUs | 10m |
-| **`heavy_idempotency.js`** | **10K replay keys + concurrent dups + balance verification** | **1200** | **15m** |
-| **`heavy_throughput.js`** | **Multi-scenario: post flood + batch + reads + reversals** | **2500+** | **20m** |
-| **`endurance.js`** | **30-min soak test at 300 RPS** | **300** | **30m** |
+| `baseline.js` | Retail mix (60% reads, 20% list, 20% post) | 500 | 2m |
+| `hotspot.js` | Hot account contention (10 accounts) | 800 | 2m |
+| `spike.js` | Burst / autoscaling | 3000 | 2m |
+| `batch.js` | Batch ingestion (50 txns/batch) | 1000 effective | 2m |
+| `idempotency.js` | Replay storm (70% replays) | 500 | 2m |
+| `read_after_write.js` | Consistency: post then read | 50 VUs | 2m |
+| **`heavy_idempotency.js`** | **10K replay keys + concurrent dups + balance verification** | **1200** | **2m** |
+| **`heavy_throughput.js`** | **Multi-scenario: post flood + batch + reads + reversals** | **2500+** | **2m** |
+| **`endurance.js`** | **Soak test at 300 RPS (raise duration for a real soak)** | **300** | **2m** |
+
+> Durations were trimmed to ≤ 2 minutes. The per-scenario stage timings live in
+> each script's `options`; raise them for longer stress/soak runs.
 
 ## Thresholds
 

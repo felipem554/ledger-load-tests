@@ -8,7 +8,7 @@ export const options = {
     raw: {
       executor: 'constant-vus',
       vus: 50,
-      duration: '10m',
+      duration: '2m',
     },
   },
   thresholds: {

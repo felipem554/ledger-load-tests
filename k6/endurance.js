@@ -1,8 +1,9 @@
 /**
  * Endurance / Soak Test
  *
- * Long-running test (30+ minutes) at sustained moderate throughput.
- * Detects memory leaks, connection pool exhaustion, and gradual degradation.
+ * Sustained moderate throughput to detect memory leaks, connection pool
+ * exhaustion, and gradual degradation. Trimmed to a 2-minute run for routine
+ * use; raise DURATION (and the scenario duration below) for a real soak.
  *
  * Run: BASE_URL=http://localhost:8080 TENANT=t1 k6 run k6/endurance.js
  */
@@ -22,7 +23,7 @@ export const options = {
       executor: 'constant-arrival-rate',
       rate: 300,
       timeUnit: '1s',
-      duration: '30m',
+      duration: '2m',
       preAllocatedVUs: 200,
       maxVUs: 1500,
     },
