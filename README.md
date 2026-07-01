@@ -29,12 +29,19 @@ run misses its SLA (success rate, zero DLQ, results fully drained).
 RATE=200 DURATION_SECONDS=120 ACCOUNTS=500 ./gradlew kafkaLoadTest
 ```
 
-Bring up the dependencies and app first:
+Bring up the dependencies and app first, either way:
 
 ```bash
+# Option A — full stack in Docker (app already has command ingestion enabled)
+docker compose -f docker/docker-compose.yml up -d --build
+
+# Option B — infra in Docker, app on the host
 docker compose -f docker-compose-test.yml up -d
 COMMAND_INGEST_ENABLED=true KAFKA_BOOTSTRAP=localhost:19092 ./gradlew bootRun
 ```
+
+The load generator runs from the host in both cases (it talks to the API on
+`localhost:8080` and Kafka on `localhost:19092`).
 
 ### Configuration (environment variables)
 
