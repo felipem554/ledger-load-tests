@@ -11,16 +11,20 @@
  * Run: BASE_URL=http://localhost:8080 TENANT=t1 k6 run k6/heavy_idempotency.js
  */
 import { check, group, sleep } from 'k6';
-import { Counter, Rate, Trend } from 'k6/metrics';
-import { postTx, getBalance, seedAccounts, transfer, uuidv4 } from './common.js';
+import { Rate, Trend } from 'k6/metrics';
+import { textSummary } from 'https://jslib.k6.io/k6-summary/0.1.0/index.js';
+import {
+  postTx, getBalance, seedAccounts, transfer, uuidv4,
+  recordIdempotentPost, recordPoolKeysCreated, countExistingIdempotencyKeys, idempotencyReport,
+} from './common.js';
+
+const REPLAY_POOL = 10000;
+const HOT_POOL = 50;
 
 // Custom metrics
-const replayCounter = new Counter('idempotency_replays');
-const newPostCounter = new Counter('idempotency_new_posts');
-const conflictCounter = new Counter('idempotency_conflicts');
 const balanceCheckRate = new Rate('balance_correctness');
-const replayLatency = new Trend('replay_latency_ms');
-const newPostLatency = new Trend('new_post_latency_ms');
+const pooledKeyLatency = new Trend('pooled_key_latency_ms');
+const freshKeyLatency = new Trend('fresh_key_latency_ms');
 
 export const options = {
   scenarios: {
@@ -67,50 +71,39 @@ export const options = {
   },
 };
 
-// Pre-generate keys for heavy replay
-const REPLAY_KEYS = Array.from({ length: 10000 }, () => uuidv4());
-// Small set of keys that will be hammered by concurrent VUs
-const HOT_KEYS = Array.from({ length: 50 }, () => uuidv4());
+// Keys must be derived from setup() data: init code runs once per VU, so a
+// random pool built at module level would be private to each VU. Shared names
+// make replays collide across VUs and make HOT keys genuinely concurrent.
+const replayKey = (runId, i) => `${runId}-replay-${i}`;
+const hotKey = (runId, i) => `${runId}-hot-${i}`;
 
 export function setup() {
   // Two fixed accounts so balances stay deterministic for verification.
-  return { accounts: seedAccounts(2, { namePrefix: 'heavy-idem' }) };
+  return { runId: uuidv4(), accounts: seedAccounts(2, { namePrefix: 'heavy-idem' }) };
 }
 
 export function replayStorm(data) {
   const [a1, a2] = data.accounts;
-  const isReplay = Math.random() < 0.7;
-  const key = isReplay
-    ? REPLAY_KEYS[Math.floor(Math.random() * REPLAY_KEYS.length)]
-    : uuidv4();
+  const pooled = Math.random() < 0.7;
+  const key = pooled ? replayKey(data.runId, Math.floor(Math.random() * REPLAY_POOL)) : uuidv4();
 
-  const start = Date.now();
   const res = postTx(transfer(a1, a2, 1, 'heavy_idempotency'), key);
-  const elapsed = Date.now() - start;
+  (pooled ? pooledKeyLatency : freshKeyLatency).add(res.timings.duration);
+  recordIdempotentPost(res, pooled);
 
-  if (res.status === 201) {
-    newPostCounter.add(1);
-    newPostLatency.add(elapsed);
-  } else if (res.status === 409) {
-    conflictCounter.add(1);
-  } else {
-    replayCounter.add(1);
-    replayLatency.add(elapsed);
-  }
-
-  check(res, {
-    'response is 201 or replay': (r) => r.status === 201 || r.status === 409 || r.status === 200,
-  });
+  check(res, { 'post 201': (r) => r.status === 201 });
 }
 
 export function concurrentDuplicates(data) {
   const [a1, a2] = data.accounts;
-  const key = HOT_KEYS[Math.floor(Math.random() * HOT_KEYS.length)];
+  const key = hotKey(data.runId, Math.floor(Math.random() * HOT_POOL));
 
   const res = postTx(transfer(a1, a2, 1, 'heavy_idempotency'), key);
+  pooledKeyLatency.add(res.timings.duration);
+  recordIdempotentPost(res, true);
 
   check(res, {
-    'concurrent dup handled': (r) => r.status === 201 || r.status === 409 || r.status === 200,
+    'concurrent dup 201': (r) => r.status === 201,
     'no 500 errors': (r) => r.status !== 500,
   });
 
@@ -151,4 +144,16 @@ export function verifyBalances(data) {
   });
 
   sleep(1);
+}
+
+export function teardown(data) {
+  const keys = [
+    ...Array.from({ length: REPLAY_POOL }, (_, i) => replayKey(data.runId, i)),
+    ...Array.from({ length: HOT_POOL }, (_, i) => hotKey(data.runId, i)),
+  ];
+  recordPoolKeysCreated(countExistingIdempotencyKeys(keys));
+}
+
+export function handleSummary(data) {
+  return { stdout: textSummary(data, { indent: ' ', enableColors: false }) + idempotencyReport(data) };
 }
